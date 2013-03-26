@@ -1,0 +1,195 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+# (c) 2013, George Miroshnykov <george.miroshnykov@gmail.com>
+#
+# This file is part of Ansible
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+DOCUMENTATION = '''
+---
+module: apt
+short_description: Manages Node.js packages via npm
+description:
+  - Manages Node.js packages via npm.
+version_added: "0.0.1"
+options:
+  name:
+    description:
+      - A package name
+    required: true
+    default: null
+  version:
+    description:
+      - The version number to install of the NPM package specified in the I(name) parameter
+    required: false
+    default: null
+  globally:
+    description:
+      - Whether to install a package(s) globally
+    required: false
+    default: "no"
+    choices: [ "yes", "no" ]
+  dest:
+    description:
+      - A directory to install packages into. Required if globally=no
+    required: false
+    default: null
+  state:
+    description:
+      - Indicates the desired package state
+    required: false
+    default: present
+    choices: [ "latest", "absent", "present" ]
+author: George Miroshnykov
+notes: []
+examples:
+    - code: "npm: name=express dest=/path/to/project"
+      description: Update repositories cache and install C(foo) package
+    - code: "apt: pkg=foo state=removed"
+      description: Remove C(foo) package
+    - code: "apt: pkg=foo state=installed"
+      description: Install the package C(foo)
+    - code: "apt: pkg=foo=1.00 state=installed"
+      description: Install the version '1.00' of package C(foo)
+    - code: "apt: pkg=nginx state=latest default_release=squeeze-backports update_cache=yes"
+      description: Update the repository cache and update package C(ngnix) to latest version using default release C(squeeze-backport)
+    - code: "apt: pkg=openjdk-6-jdk state=latest install_recommends=no"
+      description: Install latest version of C(openjdk-6-jdk) ignoring C(install-reccomends)
+    - code: "apt: upgrade=dist"
+      description: Update all packages to the latest version
+'''
+
+import os
+import json
+
+def _get_full_name(name, version=None):
+    if version is None:
+        return name
+    else:
+        return name + '@' + version
+
+def get_installed_version(module):
+
+    name = module.params['name']
+
+    cmd = [ module.get_bin_path('npm', True) ]
+    cmd.append('list')
+    cmd.append(name)
+    cmd.append('--json')
+    if module.params['globally']:
+        cmd.append('--global')
+    (rc, out, err) = module.run_command(cmd, check_rc=True)
+    info = json.loads(out)
+    if (not info or
+       not 'dependencies' in info or
+       not name in info['dependencies']):
+        return None
+
+    return info['dependencies'][name]['version']
+
+def get_remote_version(module):
+
+    cmd = [ module.get_bin_path('npm', True) ]
+    cmd.append('info')
+    cmd.append(module.params['name'])
+    cmd.append('--json')
+    (rc, out, err) = module.run_command(cmd, check_rc=True)
+    info = json.loads(out)
+    if not info:
+        return None
+
+    return info['version']
+
+def exists(module):
+
+    if module.params['state'] == 'latest':
+        module.params['version'] = get_remote_version(module)
+
+    installed_version = get_installed_version(module)
+    if module.params['version']:
+        if module.params['version'] == installed_version:
+            return True
+    else:
+        if installed_version:
+            return True
+    return False
+
+def uninstall(module):
+
+    if module.check_mode:
+        return
+
+    cmd = [ module.get_bin_path('npm', True) ]
+    cmd.append('uninstall')
+    cmd.append(module.params['name'])
+    if module.params['globally']:
+        cmd.append('--global')
+    module.run_command(cmd, check_rc=True)
+
+def install(module):
+
+    if module.check_mode:
+        return
+
+    cmd = [ module.get_bin_path('npm', True) ]
+    cmd.append('install')
+    cmd.append(_get_full_name(module.params['name'], module.params['version']))
+    module.run_command(cmd, check_rc=True)
+
+def main():
+
+    module = AnsibleModule(
+        argument_spec = dict(
+            name        = dict(required=True),
+            version     = dict(required=False),
+            globally    = dict(required=False, default=False, type='bool'),
+            dest        = dict(required=False),
+            state       = dict(default='present', choices=['present','absent','latest']),
+        ),
+        required_one_of = [['globally', 'dest']],
+        supports_check_mode = True
+    )
+
+    if module.params['version'] and module.params['state'] in ['absent', 'latest']:
+        module.fail_json(msg="Cannot specify version when state=" + module.params['state'])
+
+    changed = False
+
+    if module.params['dest']:
+        os.chdir(module.params['dest'])
+
+    if module.params['state'] in [ 'present', 'latest']:
+        if not exists(module):
+            install(module)
+            changed = True
+    elif module.params['state'] == 'absent':
+        if exists(module):
+            uninstall(module)
+            changed = True
+
+    result = {}
+    result['name'] = module.params['name']
+    result['state'] = module.params['state']
+    if module.params['version']:
+        result['version'] = module.params['version']
+    result['changed'] = changed
+
+    module.exit_json(**result)
+
+# include magic from lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+main()
